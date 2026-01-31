@@ -30,8 +30,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           OPENAI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           # Add all GitHub PATs here
-          GITHUB_PAT_ACC1: ${{ secrets.GITHUB_PAT_ACC1 }}
-          GITHUB_PAT_ACC2: ${{ secrets.GITHUB_PAT_ACC2 }}
+          PAT_ACC1: ${{ secrets.PAT_ACC1 }}
+          PAT_ACC2: ${{ secrets.PAT_ACC2 }}
         run: python supervisor.py
 
       - name: Commit and Push Changes

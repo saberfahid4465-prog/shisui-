@@ -30,7 +30,7 @@ class SupervisorBot:
 
     def get_github_pat(self, account_key: str) -> Optional[str]:
         # Maps 'acc1' to 'GITHUB_PAT_ACC1'
-        env_var = f"GITHUB_PAT_{account_key.upper()}"
+        env_var = f"PAT_{account_key.upper()}"
         return os.getenv(env_var)
 
     def fetch_latest_workflow_run(self, repo_url: str, pat: str) -> Optional[Dict]:
