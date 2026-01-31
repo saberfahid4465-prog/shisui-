@@ -1,12 +1,12 @@
-name: Supervisor Bot Daily Run
+name: Shisui Smart Assistant
 
 on:
   schedule:
-    - cron: '0 9 * * *' # Runs daily at 09:00 UTC
+    - cron: '*/15 * * * *' # Runs every 15 minutes to check for messages and monitor
   workflow_dispatch: # Allows manual trigger
 
 jobs:
-  monitor:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -24,20 +24,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Supervisor
+      - name: Run Shisui
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           OPENAI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # Add all GitHub PATs here
           PAT_ACC1: ${{ secrets.PAT_ACC1 }}
           PAT_ACC2: ${{ secrets.PAT_ACC2 }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: python supervisor.py
 
       - name: Commit and Push Changes
-        # This step is crucial because the bot might update apps.yaml via Telegram
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add apps.yaml
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update apps.yaml from Telegram [skip ci]" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update apps.yaml [skip ci]" && git push)
