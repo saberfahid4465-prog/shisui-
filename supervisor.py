@@ -4,7 +4,7 @@ import requests
 import json
 import datetime
 import time
-import random
+import uuid
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
 
@@ -18,21 +18,7 @@ class SupervisorBot:
         self.telegram_token = os.getenv("TELEGRAM_TOKEN")
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.last_update_id = 0
-        self.auto_fixes_count = 0
-        self.manual_actions_count = 0
         
-        # Get current time for system prompt
-        now = datetime.datetime.now()
-        self.system_prompt = f"""
-        You are 'Shisui', a smart Supervisor Bot and AI Assistant. 
-        Your job is to help the user monitor their GitHub bots and answer any questions.
-        Today's date is {now.strftime('%d %b %Y')}.
-        Current time is {now.strftime('%H:%M:%S')} UTC.
-        
-        Current bots being monitored:
-        {json.dumps(self.config.get('bots', []), indent=2)}
-        """
-
     def load_config(self) -> Dict:
         if not os.path.exists(self.config_path):
             return {"bots": []}
@@ -56,38 +42,14 @@ class SupervisorBot:
                 "Accept": "application/vnd.github.v3+json",
                 "User-Agent": "Supervisor-Bot"
             }
-            # Add a random query parameter to bypass any potential caching
-            response = requests.get(f"{api_url}&t={time.time()}", headers=headers, timeout=15)
+            # Use timestamp to force fresh data from GitHub API
+            response = requests.get(f"{api_url}&nocache={time.time()}", headers=headers, timeout=15)
             if response.status_code == 200:
                 runs = response.json().get("workflow_runs", [])
                 return runs[0] if runs else None
         except Exception:
             pass
         return None
-
-    def analyze_with_gemini(self, bot_name: str, error_context: str) -> Dict[str, Any]:
-        prompt = f"Analyze failure for {bot_name}: {error_context}. Return JSON with 'fix' (retry_workflow, none), 'confidence' (0-100), 'reason'."
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"}
-            )
-            return json.loads(response.choices[0].message.content)
-        except Exception:
-            return {"fix": "none", "confidence": 0}
-
-    def apply_fix(self, repo_url: str, run_id: int, pat: str, fix: str) -> bool:
-        try:
-            repo_path = repo_url.replace("https://github.com/", "").replace(".git", "").strip("/")
-            headers = {"Authorization": f"token {pat}", "Accept": "application/vnd.github.v3+json"}
-            if fix == "retry_workflow":
-                api_url = f"https://api.github.com/repos/{repo_path}/actions/runs/{run_id}/rerun"
-                resp = requests.post(api_url, headers=headers)
-                return resp.status_code == 201
-        except Exception:
-            pass
-        return False
 
     def send_telegram_message(self, text: str, chat_id: str = None):
         target_id = chat_id or self.telegram_chat_id
@@ -97,16 +59,16 @@ class SupervisorBot:
         requests.post(url, json={"chat_id": target_id, "text": text}, timeout=15)
 
     def run_monitoring(self, chat_id: str = None):
-        # FORCE REFRESH DATE
+        # DYNAMIC DATE GENERATION - NO HARDCODING
         now = datetime.datetime.now()
-        current_date = now.strftime("%d %b %Y")
-        current_time = now.strftime("%H:%M:%S")
+        current_date_str = now.strftime("%d %b %Y")
+        current_time_str = now.strftime("%H:%M:%S")
+        unique_run_id = str(uuid.uuid4())[:8]
         
-        report = [f"📊 Daily Supervisor Report – {current_date}"]
+        report = [f"📊 Daily Supervisor Report – {current_date_str}"]
         
-        self.auto_fixes_count = 0
-        self.manual_actions_count = 0
-        total_confidence = []
+        manual_actions = 0
+        auto_fixes = 0
         
         for bot in self.config.get("bots", []):
             name = bot.get("name")
@@ -117,7 +79,7 @@ class SupervisorBot:
             pat = self.get_github_pat(acc)
             if not pat:
                 report.append(f"🔴 {name} ({channel})\n   ❌ Status: Failed\n   ⚠ Error: Missing PAT")
-                self.manual_actions_count += 1
+                manual_actions += 1
                 continue
             
             run = self.fetch_latest_workflow_run(repo, pat)
@@ -130,33 +92,24 @@ class SupervisorBot:
                 report.append(f"🟢 {name} ({channel})\n   ✔ Status: Success\n   ℹ Notes: Ran normally")
             else:
                 error_msg = run.get("display_title", "Error")
-                ai_result = self.analyze_with_gemini(name, error_msg)
-                fix = ai_result.get("fix", "none")
-                total_confidence.append(ai_result.get("confidence", 0))
-                
                 report.append(f"🔴 {name} ({channel})\n   ❌ Status: Failed\n   ⚠ Error: {error_msg}")
-                if fix != "none" and self.apply_fix(repo, run.get("id"), pat, fix):
-                    report.append(f"   🛠 Auto-fix applied: {fix} ✅")
-                    self.auto_fixes_count += 1
-                else:
-                    self.manual_actions_count += 1
+                manual_actions += 1
 
-        report.append(f"\n🚨 Manual Action Required: {self.manual_actions_count}")
-        report.append(f"⚙ Auto-Fixes Applied Today: {self.auto_fixes_count}")
-        report.append(f"System Status: {'HEALTHY ✅' if self.manual_actions_count == 0 else 'ATTENTION ⚠️'}")
-        
-        if total_confidence:
-            report.append(f"Confidence (Gemini AI): {int(sum(total_confidence)/len(total_confidence))}%")
-        
-        report.append(f"\n🕒 Last Updated: {current_time} UTC")
+        report.append(f"\n🚨 Manual Action Required: {manual_actions}")
+        report.append(f"⚙ Auto-Fixes Applied Today: {auto_fixes}")
+        report.append(f"System Status: {'HEALTHY ✅' if manual_actions == 0 else 'ATTENTION ⚠️'}")
+        report.append(f"\n🕒 Last Updated: {current_time_str} UTC")
+        report.append(f"🆔 Run ID: {unique_run_id}")
         
         self.send_telegram_message("\n".join(report), chat_id)
 
     def ai_chat(self, user_message: str) -> str:
         try:
+            now = datetime.datetime.now()
+            sys_prompt = f"You are Shisui, a smart assistant. Today is {now.strftime('%d %b %Y %H:%M:%S')}. Help the user with their bots: {json.dumps(self.config.get('bots', []))}"
             response = client.chat.completions.create(
                 model="gpt-4.1-mini",
-                messages=[{"role": "system", "content": self.system_prompt}, {"role": "user", "content": user_message}]
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_message}]
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -182,9 +135,11 @@ class SupervisorBot:
 
 if __name__ == "__main__":
     bot = SupervisorBot()
-    if os.getenv("GITHUB_EVENT_NAME") in ["schedule", "workflow_dispatch"]:
+    event = os.getenv("GITHUB_EVENT_NAME")
+    if event in ["schedule", "workflow_dispatch"]:
         bot.run_monitoring()
     else:
+        # Polling mode for 10 minutes
         start = time.time()
         while time.time() - start < 600:
             bot.process_updates()
