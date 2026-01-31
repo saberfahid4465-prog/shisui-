@@ -58,7 +58,7 @@ class SupervisorBot:
         prompt = f"Analyze failure for {bot_name}: {error_context}. Return one of: retry_workflow, reinstall_dependencies, clear_cache, delay_quota_reset, restart_workflow, or none."
         try:
             response = client.chat.completions.create(
-                model="gpt-4.1-mini", # Using a standard model name
+                model="gpt-4.1-mini",
                 messages=[{"role": "user", "content": prompt}]
             )
             fix = response.choices[0].message.content.strip().lower()
@@ -107,34 +107,35 @@ class SupervisorBot:
             return
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
         print(f"DEBUG: Sending message to {self.telegram_chat_id}...")
-        resp = requests.post(url, json={"chat_id": self.telegram_chat_id, "text": text, "parse_mode": "Markdown"})
+        # Removed parse_mode to avoid "Bad Request: can't parse entities" errors
+        resp = requests.post(url, json={"chat_id": self.telegram_chat_id, "text": text})
         print(f"DEBUG: Telegram response: {resp.status_code} - {resp.text}")
 
     def run_monitoring(self):
         today = datetime.datetime.now().strftime("%d %b %Y")
-        self.report_lines.append(f"📊 Daily Supervisor Report – {today}")
+        self.report_lines.append(f"Daily Supervisor Report - {today}")
         all_healthy = True
         for bot in self.config.get("bots", []):
             name, repo, acc, channel = bot.get("name"), bot.get("repo_url"), bot.get("account"), bot.get("channel")
             pat = self.get_github_pat(acc)
             if not pat:
-                self.report_lines.append(f"🔴 {name} ({channel}) ❌ Missing PAT")
+                self.report_lines.append(f"Bot: {name} ({channel}) - Status: Missing PAT")
                 all_healthy = False
                 continue
             run = self.fetch_latest_workflow_run(repo, pat)
             if not run:
-                self.report_lines.append(f"⚪ {name} ({channel}) ❓ No runs")
+                self.report_lines.append(f"Bot: {name} ({channel}) - Status: No runs found")
                 continue
             if run.get("conclusion") == "success":
-                self.report_lines.append(f"🟢 {name} ({channel}) ✔ OK")
+                self.report_lines.append(f"Bot: {name} ({channel}) - Status: OK")
             else:
                 all_healthy = False
                 error_msg = run.get("display_title", "Error")
-                self.report_lines.append(f"🔴 {name} ({channel}) ❌ {error_msg}")
+                self.report_lines.append(f"Bot: {name} ({channel}) - Status: FAILED ({error_msg})")
                 fix = self.analyze_with_gemini(name, error_msg)
                 if fix and self.apply_fix(repo, run.get("id"), pat, fix):
-                    self.report_lines.append(f"🛠 Auto-fix: {fix} ✅")
-        self.report_lines.append(f"\nSystem status: {'HEALTHY ✅' if all_healthy else 'ATTENTION ⚠️'}")
+                    self.report_lines.append(f"Fix applied: {fix}")
+        self.report_lines.append(f"\nSystem status: {'HEALTHY' if all_healthy else 'ATTENTION REQUIRED'}")
         self.send_telegram_message("\n".join(self.report_lines))
 
 if __name__ == "__main__":
