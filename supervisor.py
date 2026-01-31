@@ -17,18 +17,18 @@ class SupervisorBot:
         self.telegram_token = os.getenv("TELEGRAM_TOKEN")
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.last_update_id = 0
+        self.auto_fixes_count = 0
+        self.manual_actions_count = 0
         
         # System prompt for the AI Assistant
-        self.system_prompt = """
+        self.system_prompt = f"""
         You are 'Shisui', a smart Supervisor Bot and AI Assistant. 
         Your job is to help the user monitor their GitHub bots and answer any questions.
-        You can:
-        1. Monitor bots: Check status of GitHub workflows.
-        2. Add bots: If a user provides a GitHub URL, account, and channel, help them add it.
-        3. Chat: Be friendly, helpful, and smart.
+        Today's date is {datetime.datetime.now().strftime('%d %b %Y')}.
         
         Current bots being monitored:
-        """ + json.dumps(self.config.get('bots', []), indent=2)
+        {json.dumps(self.config.get('bots', []), indent=2)}
+        """
 
     def load_config(self) -> Dict:
         if not os.path.exists(self.config_path):
@@ -46,22 +46,123 @@ class SupervisorBot:
 
     def fetch_latest_workflow_run(self, repo_url: str, pat: str) -> Optional[Dict]:
         try:
-            parts = repo_url.rstrip("/").split("/")
-            owner_repo = f"{parts[-2]}/{parts[-1]}"
-            api_url = f"https://api.github.com/repos/{owner_repo}/actions/runs?per_page=1"
-            headers = {"Authorization": f"token {pat}", "Accept": "application/vnd.github.v3+json"}
-            response = requests.get(api_url, headers=headers, timeout=10)
+            # Clean URL and get owner/repo
+            repo_path = repo_url.replace("https://github.com/", "").replace(".git", "").strip("/")
+            api_url = f"https://api.github.com/repos/{repo_path}/actions/runs?per_page=1"
+            headers = {
+                "Authorization": f"token {pat}",
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "Supervisor-Bot"
+            }
+            response = requests.get(api_url, headers=headers, timeout=15)
             if response.status_code == 200:
                 runs = response.json().get("workflow_runs", [])
                 return runs[0] if runs else None
+            else:
+                print(f"GitHub API Error for {repo_path}: {response.status_code}")
         except Exception as e:
             print(f"Error fetching workflow: {e}")
         return None
 
+    def analyze_with_gemini(self, bot_name: str, error_context: str) -> Dict[str, Any]:
+        prompt = f"""
+        Analyze failure for {bot_name}: {error_context}. 
+        Return a JSON object with:
+        - "fix": one of [retry_workflow, reinstall_dependencies, clear_cache, delay_quota_reset, restart_workflow, none]
+        - "confidence": integer 0-100
+        - "reason": short explanation
+        """
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
+            )
+            return json.loads(response.choices[0].message.content)
+        except Exception:
+            return {"fix": "none", "confidence": 0, "reason": "AI analysis failed"}
+
+    def apply_fix(self, repo_url: str, run_id: int, pat: str, fix: str) -> bool:
+        try:
+            repo_path = repo_url.replace("https://github.com/", "").replace(".git", "").strip("/")
+            headers = {"Authorization": f"token {pat}", "Accept": "application/vnd.github.v3+json"}
+            if fix in ["retry_workflow", "restart_workflow"]:
+                api_url = f"https://api.github.com/repos/{repo_path}/actions/runs/{run_id}/rerun"
+                resp = requests.post(api_url, headers=headers)
+                return resp.status_code == 201
+        except Exception:
+            pass
+        return False
+
+    def send_telegram_message(self, text: str, chat_id: str = None):
+        target_id = chat_id or self.telegram_chat_id
+        if not self.telegram_token or not target_id:
+            return
+        url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+        requests.post(url, json={"chat_id": target_id, "text": text}, timeout=15)
+
+    def run_monitoring(self, chat_id: str = None):
+        # Use real-time date
+        current_date = datetime.datetime.now().strftime("%d %b %Y")
+        report = [f"📊 Daily Supervisor Report – {current_date}"]
+        
+        self.auto_fixes_count = 0
+        self.manual_actions_count = 0
+        total_confidence = []
+        
+        for bot in self.config.get("bots", []):
+            name = bot.get("name")
+            repo = bot.get("repo_url")
+            acc = bot.get("account")
+            channel = bot.get("channel")
+            
+            pat = self.get_github_pat(acc)
+            if not pat:
+                report.append(f"🔴 {name} ({channel})\n   ❌ Status: Failed\n   ⚠ Error: Missing PAT")
+                self.manual_actions_count += 1
+                continue
+            
+            run = self.fetch_latest_workflow_run(repo, pat)
+            if not run:
+                report.append(f"🟢 {name} ({channel})\n   ✔ Status: Success\n   ℹ Notes: No recent runs found")
+                continue
+            
+            status = run.get("conclusion")
+            if status == "success":
+                report.append(f"🟢 {name} ({channel})\n   ✔ Status: Success\n   ℹ Notes: Ran normally")
+            else:
+                error_msg = run.get("display_title", "Unknown Error")
+                ai_result = self.analyze_with_gemini(name, error_msg)
+                fix = ai_result.get("fix", "none")
+                confidence = ai_result.get("confidence", 0)
+                total_confidence.append(confidence)
+                
+                report.append(f"🔴 {name} ({channel})\n   ❌ Status: Failed\n   ⚠ Error: {error_msg}")
+                
+                if fix != "none":
+                    if self.apply_fix(repo, run.get("id"), pat, fix):
+                        report.append(f"   🛠 Auto-fix applied: {fix.replace('_', ' ')} ✅")
+                        self.auto_fixes_count += 1
+                    else:
+                        report.append(f"   🛠 Auto-fix failed ❌")
+                        self.manual_actions_count += 1
+                else:
+                    report.append(f"   ⚠️ Manual action required")
+                    self.manual_actions_count += 1
+
+        report.append(f"\n🚨 Manual Action Required: {self.manual_actions_count}")
+        report.append(f"⚙ Auto-Fixes Applied Today: {self.auto_fixes_count}")
+        
+        system_status = "HEALTHY ✅" if self.manual_actions_count == 0 else "ATTENTION REQUIRED ⚠️"
+        report.append(f"System Status: {system_status}")
+        
+        if total_confidence:
+            avg_conf = sum(total_confidence) / len(total_confidence)
+            report.append(f"Confidence (Gemini AI): {int(avg_conf)}%")
+        
+        self.send_telegram_message("\n".join(report), chat_id)
+
     def ai_chat(self, user_message: str) -> str:
-        """
-        Handles general chat and intent recognition using Gemini.
-        """
         try:
             response = client.chat.completions.create(
                 model="gpt-4.1-mini",
@@ -72,103 +173,36 @@ class SupervisorBot:
             )
             return response.choices[0].message.content
         except Exception as e:
-            return f"I'm having a bit of trouble thinking right now. Error: {e}"
-
-    def send_telegram_message(self, text: str, chat_id: str = None):
-        target_id = chat_id or self.telegram_chat_id
-        if not self.telegram_token or not target_id:
-            return
-        url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-        requests.post(url, json={"chat_id": target_id, "text": text}, timeout=10)
+            return f"Error: {e}"
 
     def process_updates(self):
-        """
-        Polls for new messages and responds.
-        """
         if not self.telegram_token: return
-        
         url = f"https://api.telegram.org/bot{self.telegram_token}/getUpdates"
-        params = {"offset": self.last_update_id + 1, "timeout": 30}
-        
+        params = {"offset": self.last_update_id + 1, "timeout": 20}
         try:
-            resp = requests.get(url, params=params, timeout=35).json()
+            resp = requests.get(url, params=params, timeout=25).json()
             if not resp.get("ok"): return
-            
             for update in resp.get("result", []):
                 self.last_update_id = update["update_id"]
                 message = update.get("message", {})
                 text = message.get("text", "")
                 chat_id = message.get("chat", {}).get("id")
-                
                 if not text: continue
-                
-                print(f"Received message: {text} from {chat_id}")
-                
-                # Handle specific commands or use AI for general chat
                 if text.lower() == "/status":
                     self.run_monitoring(chat_id)
-                elif text.startswith("Add new Telegram bot:"):
-                    self.handle_add_bot(text, chat_id)
                 else:
-                    # Use AI for smart response
-                    ai_response = self.ai_chat(text)
-                    self.send_telegram_message(ai_response, chat_id)
-                    
-        except Exception as e:
-            print(f"Polling error: {e}")
-
-    def handle_add_bot(self, text: str, chat_id: str):
-        try:
-            data = text.split(":")[1].strip().split(",")
-            repo_url = data[0].strip()
-            acc = data[1].strip()
-            channel = data[2].strip()
-            new_bot = {"name": repo_url.split("/")[-1], "repo_url": repo_url, "account": acc, "channel": channel, "type": "telegram"}
-            if not any(b['repo_url'] == repo_url for b in self.config['bots']):
-                self.config['bots'].append(new_bot)
-                self.save_config()
-                self.send_telegram_message("✅ I've added the new bot to my monitoring list!", chat_id)
-            else:
-                self.send_telegram_message("ℹ️ That bot is already in my list.", chat_id)
-        except Exception as e:
-            self.send_telegram_message(f"❌ I couldn't parse that. Please use: Add new Telegram bot: URL, Account, Channel", chat_id)
-
-    def run_monitoring(self, chat_id: str = None):
-        today = datetime.datetime.now().strftime("%d %b %Y")
-        report = [f"📊 Daily Supervisor Report – {today}"]
-        
-        all_healthy = True
-        for bot in self.config.get("bots", []):
-            name, repo, acc, channel = bot.get("name"), bot.get("repo_url"), bot.get("account"), bot.get("channel")
-            pat = self.get_github_pat(acc)
-            
-            if not pat:
-                report.append(f"🔴 {name} ({channel})\n   ❌ Status: Missing PAT")
-                all_healthy = False
-                continue
-            
-            run = self.fetch_latest_workflow_run(repo, pat)
-            if not run or run.get("conclusion") == "success":
-                report.append(f"🟢 {name} ({channel})\n   ✔ Status: Success")
-            else:
-                report.append(f"🔴 {name} ({channel})\n   ❌ Status: Failed ({run.get('display_title', 'Error')})")
-                all_healthy = False
-
-        report.append(f"\nSystem Status: {'HEALTHY ✅' if all_healthy else 'ATTENTION REQUIRED ⚠️'}")
-        self.send_telegram_message("\n".join(report), chat_id)
+                    self.send_telegram_message(self.ai_chat(text), chat_id)
+        except Exception: pass
 
 if __name__ == "__main__":
     bot = SupervisorBot()
-    print("Shisui Smart Assistant is starting...")
-    
-    # If run via schedule, just do monitoring
-    if os.getenv("GITHUB_EVENT_NAME") == "schedule" or os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch":
+    # Check if run by schedule or manual trigger
+    event = os.getenv("GITHUB_EVENT_NAME")
+    if event in ["schedule", "workflow_dispatch"]:
         bot.run_monitoring()
     else:
-        # Otherwise, run in polling mode for a limited time (to fit in GH Action)
-        # In a real server, this would be a while True loop.
-        # For GH Actions, we'll poll for 5 minutes then exit.
-        start_time = time.time()
-        while time.time() - start_time < 300: # 5 minutes
+        # Polling mode for 10 minutes in GH Actions
+        start = time.time()
+        while time.time() - start < 600:
             bot.process_updates()
-            time.sleep(2)
+            time.sleep(5)
