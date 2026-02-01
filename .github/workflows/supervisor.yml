@@ -31,6 +31,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PAT_ACC1: ${{ secrets.PAT_ACC1 }}
           PAT_ACC2: ${{ secrets.PAT_ACC2 }}
+          PAT_ACC3: ${{ secrets.PAT_ACC3 }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: python supervisor.py
 
