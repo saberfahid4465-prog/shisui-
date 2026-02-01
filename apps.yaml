@@ -19,3 +19,8 @@ bots:
     account: "acc2"
     channel: "@koko_teacher"
     type: "youtube"
+  - name: "Post Koko Bot"
+    repo_url: "https://github.com/arabsaber24-ctrl/post-koko"
+    account: "acc3"
+    channel: "@post_koko_channel"
+    type: "telegram"
