@@ -18,12 +18,16 @@ class SupervisorBot:
         self.telegram_token = os.getenv("TELEGRAM_TOKEN")
         self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.last_update_id = 0
+        print(f"DEBUG: Initialized. Token set: {bool(self.telegram_token)}, Chat ID: {self.telegram_chat_id}")
         
     def load_config(self) -> Dict:
         if not os.path.exists(self.config_path):
+            print(f"DEBUG: Config file {self.config_path} not found.")
             return {"bots": []}
         with open(self.config_path, "r") as f:
-            return yaml.safe_load(f) or {"bots": []}
+            config = yaml.safe_load(f) or {"bots": []}
+            print(f"DEBUG: Loaded {len(config.get('bots', []))} bots.")
+            return config
 
     def save_config(self):
         with open(self.config_path, "w") as f:
@@ -31,7 +35,9 @@ class SupervisorBot:
 
     def get_github_pat(self, account_key: str) -> Optional[str]:
         env_var = f"PAT_{account_key.upper()}"
-        return os.getenv(env_var)
+        pat = os.getenv(env_var)
+        print(f"DEBUG: PAT for {account_key} ({env_var}): {'Found' if pat else 'Not Found'}")
+        return pat
 
     def fetch_latest_workflow_run(self, repo_url: str, pat: str) -> Optional[Dict]:
         try:
@@ -42,24 +48,33 @@ class SupervisorBot:
                 "Accept": "application/vnd.github.v3+json",
                 "User-Agent": "Supervisor-Bot"
             }
-            # Use timestamp to force fresh data from GitHub API
+            print(f"DEBUG: Fetching workflow for {repo_path}...")
             response = requests.get(f"{api_url}&nocache={time.time()}", headers=headers, timeout=15)
             if response.status_code == 200:
                 runs = response.json().get("workflow_runs", [])
+                print(f"DEBUG: Found {len(runs)} runs for {repo_path}.")
                 return runs[0] if runs else None
-        except Exception:
-            pass
+            else:
+                print(f"DEBUG: GitHub API Error for {repo_path}: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"DEBUG: Exception fetching workflow for {repo_url}: {e}")
         return None
 
     def send_telegram_message(self, text: str, chat_id: str = None):
         target_id = chat_id or self.telegram_chat_id
         if not self.telegram_token or not target_id:
+            print(f"DEBUG: Telegram not configured. Token: {bool(self.telegram_token)}, Target ID: {target_id}")
             return
         url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-        requests.post(url, json={"chat_id": target_id, "text": text}, timeout=15)
+        print(f"DEBUG: Sending Telegram message to {target_id}...")
+        try:
+            resp = requests.post(url, json={"chat_id": target_id, "text": text}, timeout=15)
+            print(f"DEBUG: Telegram response: {resp.status_code} - {resp.text}")
+        except Exception as e:
+            print(f"DEBUG: Exception sending Telegram message: {e}")
 
     def run_monitoring(self, chat_id: str = None):
-        # DYNAMIC DATE GENERATION - NO HARDCODING
+        print("DEBUG: Starting monitoring run...")
         now = datetime.datetime.now()
         current_date_str = now.strftime("%d %b %Y")
         current_time_str = now.strftime("%H:%M:%S")
@@ -121,25 +136,31 @@ class SupervisorBot:
         params = {"offset": self.last_update_id + 1, "timeout": 20}
         try:
             resp = requests.get(url, params=params, timeout=25).json()
-            if not resp.get("ok"): return
+            if not resp.get("ok"): 
+                print(f"DEBUG: Telegram getUpdates error: {resp}")
+                return
             for update in resp.get("result", []):
                 self.last_update_id = update["update_id"]
                 msg = update.get("message", {})
                 text = msg.get("text", "")
                 cid = msg.get("chat", {}).get("id")
+                print(f"DEBUG: Received message: '{text}' from {cid}")
                 if text.lower() == "/status":
                     self.run_monitoring(cid)
                 elif text:
                     self.send_telegram_message(self.ai_chat(text), cid)
-        except Exception: pass
+        except Exception as e: 
+            print(f"DEBUG: Exception in process_updates: {e}")
 
 if __name__ == "__main__":
     bot = SupervisorBot()
     event = os.getenv("GITHUB_EVENT_NAME")
+    print(f"DEBUG: Event name: {event}")
     if event in ["schedule", "workflow_dispatch"]:
         bot.run_monitoring()
     else:
         # Polling mode for 10 minutes
+        print("DEBUG: Entering polling mode...")
         start = time.time()
         while time.time() - start < 600:
             bot.process_updates()
